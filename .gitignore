@@ -1,0 +1,17 @@
+*.log
+*.tmp
+*.bak
+*~
+config/llm-gateway.conf
+!config/llm-gateway.conf.example
+*credentials*
+*.key
+*.pem
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+/tmp/
+/outputs/
+validate-*.sh
