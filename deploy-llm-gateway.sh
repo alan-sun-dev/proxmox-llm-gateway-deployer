@@ -3,7 +3,6 @@
 # Proxmox LLM Gateway VM Deployment Script
 # Version: 3.3.3c - Enterprise Grade (Production Ready - Final)
 # Description: Production-ready deployment of LiteLLM gateway with monitoring
-# Author: Optimized for FedEx APAC ACCS Team
 # Usage: ./deploy-llm-gateway.sh [config-file]
 #
 # Changelog v3.3.3c:
