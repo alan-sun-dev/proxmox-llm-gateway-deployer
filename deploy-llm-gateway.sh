@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 #===============================================================================
 # Proxmox LLM Gateway VM Deployment Script
-# Version: 3.3.3b - Enterprise Grade (Production Ready - Final)
+# Version: 3.3.3c - Enterprise Grade (Production Ready - Final)
 # Description: Production-ready deployment of LiteLLM gateway with monitoring
 # Author: Optimized for FedEx APAC ACCS Team
 # Usage: ./deploy-llm-gateway.sh [config-file]
+#
+# Changelog v3.3.3c:
+# - CRITICAL: Fixed log() crash when LOG_FILE empty (set -e + write to "")
+# - CRITICAL: Fixed DEBUG case [[ ]] && pattern causing exit under set -e
+# - CRITICAL: Fixed validate_snippet_storage() using non-existent pvesm config
+#   Now parses /etc/pve/storage.cfg directly with auto-enable snippets
+# - FIX: Reordered main() to call setup_logging() BEFORE load_config/load_litellm
+# - HARDENING: All [[ ]] && patterns in log() replaced with if/fi blocks
 #
 # Changelog v3.3.3b:
 # - CRITICAL: Added bootcmd to create /etc/llm-gateway before write_files stage
@@ -29,7 +37,7 @@ set -euo pipefail
 #===============================================================================
 # SCRIPT METADATA
 #===============================================================================
-readonly SCRIPT_VERSION="3.3.3b"
+readonly SCRIPT_VERSION="3.3.3c"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 readonly MAX_CONFIG_SIZE_BYTES=262144  # 256KB limit for external configs
@@ -156,7 +164,10 @@ log() {
     local timestamp="$(date +'%Y-%m-%d %H:%M:%S')"
     local log_entry="[$timestamp] [$level] [PID:$$] $msg"
     
-    echo "$log_entry" >> "$LOG_FILE"
+    # Guard: only write to log file if LOG_FILE is set and writable
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "$log_entry" >> "$LOG_FILE" 2>/dev/null || true
+    fi
     
     case "$level" in
         ERROR)
@@ -172,7 +183,9 @@ log() {
             echo -e "${BLUE}ℹ️  $msg${NC}"
             ;;
         DEBUG)
-            [[ "${DEBUG}" == "1" ]] && echo -e "${CYAN}🔍 $msg${NC}"
+            if [[ "${DEBUG:-0}" == "1" ]]; then
+                echo -e "${CYAN}🔍 $msg${NC}"
+            fi
             ;;
         STEP)
             echo -e "${MAGENTA}📍 $msg${NC}"
@@ -483,32 +496,55 @@ validate_snippet_storage() {
             fatal_error "Snippet storage '$SNIPPET_STORAGE' not found"
         fi
         
-        local st_conf
-        st_conf="$(pvesm config "$SNIPPET_STORAGE" 2>/dev/null || true)"
+        # Parse /etc/pve/storage.cfg directly (pvesm config does not exist)
+        local storage_cfg="/etc/pve/storage.cfg"
+        if [[ ! -f "$storage_cfg" ]]; then
+            fatal_error "Proxmox storage config not found: $storage_cfg"
+        fi
+        
+        # Extract the block for our storage (e.g. "dir: local" followed by indented lines)
+        local st_block
+        st_block="$(awk -v store="$SNIPPET_STORAGE" '
+            /^[a-z]+:[[:space:]]+/ {
+                split($0, a, ":")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[2])
+                if (a[2] == store) { found=1; type=a[1]; next }
+                else { found=0 }
+            }
+            found && /^[[:space:]]/ { print }
+        ' "$storage_cfg")" || true
+        
         local st_type
-        st_type="$(awk '/^[[:space:]]*type[[:space:]]/{print $2}' <<<"$st_conf" | head -n1 || true)"
+        st_type="$(awk -v store="$SNIPPET_STORAGE" '
+            /^[a-z]+:[[:space:]]+/ {
+                split($0, a, ":")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[2])
+                if (a[2] == store) { print a[1]; exit }
+            }
+        ' "$storage_cfg")" || true
+        
         local st_path
-        st_path="$(awk '/^[[:space:]]*path[[:space:]]/{print $2}' <<<"$st_conf" | head -n1 || true)"
+        st_path="$(awk '/^[[:space:]]+path[[:space:]]/{print $2; exit}' <<<"$st_block")" || true
         
         if [[ "$st_type" != "dir" || -z "${st_path}" ]]; then
-            fatal_error "Snippet storage '$SNIPPET_STORAGE' is not a directory storage (type=dir)"
+            fatal_error "Snippet storage '$SNIPPET_STORAGE' is not a directory storage (type=dir). Detected type='${st_type:-unknown}', path='${st_path:-not set}'"
         fi
         
         SNIP_DIR="${st_path%/}/snippets"
         mkdir -p "$SNIP_DIR" 2>/dev/null || fatal_error "Cannot create snippets directory: $SNIP_DIR"
         
-        if ! grep -q 'content.*snippets' <<<"$st_conf"; then
+        # Check and auto-enable snippets content type
+        local st_content
+        st_content="$(awk '/^[[:space:]]+content[[:space:]]/{$1=""; gsub(/^[[:space:]]+/,""); print; exit}' <<<"$st_block")" || true
+        
+        if [[ ! "$st_content" =~ snippets ]]; then
             log "INFO" "Enabling 'snippets' content on storage '$SNIPPET_STORAGE'..."
-            local existing_content
-            existing_content="$(awk '/^[[:space:]]*content[[:space:]]/{$1=""; sub(/^[[:space:]]*/,""); print}' <<<"$st_conf" | head -n1 || true)"
-            
-            if [[ -n "$existing_content" ]]; then
-                if [[ ",$existing_content," != *",snippets,"* ]]; then
-                    pvesm set "$SNIPPET_STORAGE" --content "${existing_content},snippets" >/dev/null
-                fi
+            if [[ -n "$st_content" ]]; then
+                pvesm set "$SNIPPET_STORAGE" --content "${st_content},snippets" >/dev/null
             else
                 pvesm set "$SNIPPET_STORAGE" --content "vztmpl,iso,backup,snippets" >/dev/null
             fi
+            log "SUCCESS" "Added 'snippets' content type to '$SNIPPET_STORAGE'"
         fi
         
         log "SUCCESS" "Snippet storage configured: $SNIP_DIR"
@@ -1715,6 +1751,9 @@ main() {
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo
     
+    # CRITICAL: setup_logging MUST run first so log() can write to LOG_FILE
+    setup_logging
+    
     if [[ "${DEBUG}" == "1" ]]; then
         set -x
         log "DEBUG" "Debug mode enabled"
@@ -1726,8 +1765,6 @@ main() {
     if [[ "${INTERACTIVE}" == "1" ]]; then
         interactive_setup
     fi
-    
-    setup_logging
     
     check_prerequisites
     validate_inputs
