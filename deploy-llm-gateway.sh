@@ -1962,6 +1962,7 @@ packages:
   - ca-certificates
   - gnupg
   - lsb-release
+  - qemu-guest-agent
 
 write_files:
   - path: /etc/llm-gateway/.env
