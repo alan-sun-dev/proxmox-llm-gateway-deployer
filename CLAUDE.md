@@ -61,6 +61,7 @@ journalctl -u pvedaemon -f       # 即時日誌
 ./deploy-llm-gateway.sh --report        # JSON 格式配置報告
 ./deploy-llm-gateway.sh --lint          # 語法檢查
 ./deploy-llm-gateway.sh --self-test     # 自我測試
+INTERACTIVE=0 ./deploy-llm-gateway.sh   # 非互動模式部署
 ```
 
 測試：
@@ -68,6 +69,27 @@ journalctl -u pvedaemon -f       # 即時日誌
 bats /root/test-deploy-llm-gateway.bats   # 執行 BATS 單元測試（不需要 Proxmox 環境）
 ```
 
+### 腳本架構注意事項
+
+- 部署流程為 10 個步驟，由 `main()` 依序呼叫各函式（create_vm_shell → import_and_attach_disk → configure_disk_and_boot → add_cloudinit_drive → configure_cloudinit_network → generate_userdata → ...）
+- cloud-init user data 以 heredoc 一次寫入（`cat > $userdata_file <<EOF`），其中的變數（如 `$SSH_PUBKEY`）會在寫入時展開，修改時注意不要寫死值
+- `qm importdisk` 的進度和結果都輸出到 **stderr**，擷取輸出時需要 `2>&1` 而非只靠 stdout
+- LiteLLM Docker 映像的 `latest` tag 只有 arm64，amd64 主機必須用 `main-stable` tag
+- Prometheus 容器以 UID 65534 (nobody) 執行，Grafana 以 UID 472 執行，掛載的 data 目錄需要對應的 chown
+- `set -euo pipefail` 全域生效，管線中的 `grep` 無匹配會導致腳本退出，需加 `|| true` 保護
+
+### 重新部署流程
+
+```bash
+qm stop 120 && qm destroy 120 --purge   # 刪除舊 VM
+ssh-keygen -R 192.168.200.120            # 清除舊的 host key
+INTERACTIVE=0 ./deploy-llm-gateway.sh    # 重新部署
+```
+
 ## 目前運行的 VM
 
-- **VMID 120**: llm-gateway (running, 8GB RAM)
+- **VMID 120**: llm-gateway
+  - IP: `192.168.200.120`，SSH: `ssh ubuntu@192.168.200.120`
+  - 服務：LiteLLM (:4000)、PostgreSQL、Redis、Prometheus (:9090)、Grafana (:3000)
+  - 儲存：ssdpool (ZFS)，60GB 磁碟
+  - 開機自啟：順序 3，延遲 30s
