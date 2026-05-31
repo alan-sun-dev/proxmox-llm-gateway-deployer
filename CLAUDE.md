@@ -93,3 +93,47 @@ INTERACTIVE=0 ./deploy-llm-gateway.sh    # 重新部署
   - 服務：LiteLLM (:4000)、PostgreSQL、Redis、Prometheus (:9090)、Grafana (:3000)
   - 儲存：ssdpool (ZFS)，60GB 磁碟
   - 開機自啟：順序 3，延遲 30s
+
+- **VMID 121**: servicenow-automation
+  - IP: `192.168.200.31`，**無可用 SSH key**，只能透過 `qm guest exec 121 -- bash -c "..."` 操作
+  - 服務：Next.js UI (:3000)、noVNC (:6080)，以 Docker Compose 管理
+  - 原始碼：`/home/ubuntu/servicenow-automation/`（monorepo）
+  - 備份：`/home/ubuntu/servicenow-automation.bak/`
+  - 開機自啟：是（onboot=1）
+
+### VM 121 操作指令
+
+```bash
+# 進入 VM 執行指令
+qm guest exec 121 -- bash -c "<command>"
+
+# Docker 操作
+qm guest exec 121 -- bash -c "docker ps"
+qm guest exec 121 -- bash -c "docker logs --tail 50 servicenow-automation 2>&1"
+qm guest exec 121 -- bash -c "cd /home/ubuntu/servicenow-automation && docker compose down && docker compose up -d"
+
+# 重建 image（修改原始碼後執行）
+qm guest exec 121 -- bash -c "cd /home/ubuntu/servicenow-automation && docker build -f docker/Dockerfile -t servicenow-automation:latest . 2>&1 | tail -20"
+
+# 復原備份
+qm guest exec 121 -- bash -c "rm -rf /home/ubuntu/servicenow-automation && cp -r /home/ubuntu/servicenow-automation.bak /home/ubuntu/servicenow-automation"
+```
+
+### VM 121 servicenow-automation 架構
+
+- **功能**：FedEx IT Taiwan 內部工具，將郵件自動轉成 ServiceNow Field IT Request 並用 Playwright 填表提交
+- **Tech stack**：Next.js 15、React 19、TypeScript、Tailwind CSS + shadcn/ui、SQLite（Drizzle ORM）、Playwright
+- **UI 元件庫**：shadcn/ui（`webapp/components/ui/`），自訂元件包含 Button、Card、Textarea、Badge
+- **LLM**：連接 `192.168.200.101:8000`（Supermicro 實體機，vLLM，qwen3.6-35b）；也支援 Anthropic API
+- **ServiceNow**：`https://pdsm.service-now.com`，Okta SSO 認證，session 存於 Docker volume
+
+#### 寫入 VM 檔案的正確方式
+
+heredoc 在 `qm guest exec` 環境下遇到 `${...}` 會被 shell 展開破壞，正確做法：
+
+```bash
+# 1. 在 pve1 本地寫好檔案
+# 2. base64 編碼後送入 VM
+b64=$(base64 -w0 /tmp/MyFile.tsx)
+qm guest exec 121 -- bash -c "echo '${b64}' | base64 -d > /home/ubuntu/servicenow-automation/webapp/components/MyFile.tsx"
+```
